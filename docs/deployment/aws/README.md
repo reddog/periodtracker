@@ -6,9 +6,16 @@ The task definitions reference `latest` in the new ECR repositories, but the CDK
 
 ## Database password prerequisite
 
-CloudFormation cannot create Systems Manager `SecureString` parameters. Before deploying, create `/oky/database/master-password` as an SSM Parameter Store `SecureString` in the target account and region. The stack uses that same encrypted value for the Aurora master password and injects it into both task definitions as `DATABASE_PASSWORD`. Keep the parameter version at `1` for this initial stack; changing its value requires coordinating a database password rotation.
+CloudFormation cannot create Systems Manager `SecureString` parameters. Before deploying, create these SSM Parameter Store `SecureString` parameters in the target account and region:
 
-Other application secrets from the existing env templates, such as `APPLICATION_SECRET`, `PASSPORT_SECRET`, and Firebase credentials, are intentionally not included as plaintext environment values. Their SSM parameter mapping will be added in a subsequent deployment step.
+- `/oky/database/master-password`
+- `/oky/api/application-secret`
+- `/oky/cms/passport-secret`
+- `/oky/cms/google-application-credentials`
+
+The stack uses the database password for the Aurora master password and injects it into both task definitions as `DATABASE_PASSWORD`. The other values are injected into their respective task definitions as secrets. Keep each parameter version at `1` for this initial stack; changing the database password requires coordinating a database password rotation.
+
+Application secrets are not included as plaintext environment values.
 
 ## Commands
 
