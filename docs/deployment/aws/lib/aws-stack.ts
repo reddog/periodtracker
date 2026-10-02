@@ -16,14 +16,16 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import * as kms from 'aws-cdk-lib/aws-kms';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as rds from 'aws-cdk-lib/aws-rds';
-import * as ssm from 'aws-cdk-lib/aws-ssm';
+import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { Construct } from 'constructs';
 
 const PROJECT_NAME = 'Oky';
-const DATABASE_PASSWORD_PARAMETER = '/oky/database/password';
-const APPLICATION_SECRET_PARAMETER = '/oky/api/application-secret';
-const PASSPORT_SECRET_PARAMETER = '/oky/cms/passport-secret';
-const GOOGLE_APPLICATION_CREDENTIALS_PARAMETER = '/oky/cms/google-application-credentials';
+const DATABASE_CLUSTER_MASTER_USERNAME = 'clusteradmin';
+const DATABASE_CLUSTER_DEFAULT_DATABASE_NAME = 'oky';
+const DATABASE_CLUSTER_CREDENTIALS_SECRET_NAME = '/oky/database/credentials';
+const APPLICATION_SECRET_SECRET_NAME = '/oky/api/application-secret';
+const PASSPORT_SECRET_SECRET_NAME = '/oky/cms/passport-secret';
+const GOOGLE_APPLICATION_CREDENTIALS_SECRET_NAME = '/oky/cms/google-application-credentials';
 const POSTGRES_PORT = 5432;
 const HTTPS_PORT = 443;
 const API_SERVICE_PORT = 3000;
@@ -34,37 +36,30 @@ export class OkyAwsStack extends Stack {
   constructor(scope: Construct, id: string, props?: StackProps) {
     super(scope, id, props);
 
-    const domainName = new CfnParameter(this, 'DomainName', {
+    const apiServiceDomainName = new CfnParameter(this, 'ApiServiceDomainName', {
       type: 'String',
-      description: 'Root domain used by the Oky deployment (for example, okyapp.info).',
-      allowedPattern: '^[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$',
-      constraintDescription: 'Enter a valid root domain name.'
+      description: 'Domain name for the API service (for example, api.okyapp.info).',
+      allowedPattern: '^[a-zA-Z0-9.-]+$',
+      constraintDescription: 'Enter a valid domain name (alphanumeric, dot, or hyphen).'
     });
 
-    const apiServiceSubdomain = new CfnParameter(this, 'ApiServiceSubdomain', {
+    const cmsServiceDomainName = new CfnParameter(this, 'CmsServiceDomainName', {
       type: 'String',
-      description: 'Subdomain for the API service (for example, api).',
+      description: 'Domain name for the CMS service (for example, cms.okyapp.info).',
       allowedPattern: '^[a-zA-Z0-9.-]+$',
-      constraintDescription: 'Enter a valid subdomain name (alphanumeric, dot, or hyphen).'
-    });
-
-    const cmsServiceSubdomain = new CfnParameter(this, 'CmsServiceSubdomain', {
-      type: 'String',
-      description: 'Subdomain for the CMS service (for example, cms).',
-      allowedPattern: '^[a-zA-Z0-9.-]+$',
-      constraintDescription: 'Enter a valid subdomain name (alphanumeric, dot, or hyphen).'
+      constraintDescription: 'Enter a valid domain name (alphanumeric, dot, or hyphen).'
     });
 
     const apiServiceCpu = new CfnParameter(this, 'ApiServiceCpu', {
       type: 'Number',
-      description: 'CPU units for the API service task.',
+      description: 'API service ECS Task, CPU units.',
       default: 512,
       minValue: 128,
       maxValue: 1024
     });
     const apiServiceMemory = new CfnParameter(this, 'ApiServiceMemory', {
       type: 'Number',
-      description: 'Memory (in MiB) for the API service task.',
+      description: 'API service ECS Task, Memory (in MiB).',
       default: 1024,
       minValue: 512,
       maxValue: 4096
@@ -72,64 +67,50 @@ export class OkyAwsStack extends Stack {
 
     const cmsServiceCpu = new CfnParameter(this, 'CmsServiceCpu', {
       type: 'Number',
-      description: 'CPU units for the CMS service task.',
+      description: 'CMS service ECS Task, CPU units.',
       default: 512,
       minValue: 128,
       maxValue: 1024
     });
     const cmsServiceMemory = new CfnParameter(this, 'CmsServiceMemory', {
       type: 'Number',
-      description: 'Memory (in MiB) for the CMS service task.',
+      description: 'CMS service ECS Task, Memory (in MiB).',
       default: 1024,
       minValue: 512,
       maxValue: 4096
     });
 
-    const databaseUsername = new CfnParameter(this, 'DatabaseUsername', {
+    const clientDatabaseSchema = new CfnParameter(this, 'ClientDatabaseSchema', {
       type: 'String',
-      description: 'Database username for the Oky deployment.',
-      allowedPattern: '^[a-zA-Z0-9._-]{1,32}$',
-      constraintDescription: 'Enter a valid database username (1-32 characters, alphanumeric, underscore, hyphen, or dot).'
-    });
-
-    const databaseName = new CfnParameter(this, 'DatabaseName', {
-      type: 'String',
-      description: 'Database name for the Oky deployment.',
-      allowedPattern: '^[a-zA-Z0-9._-]{1,32}$',
-      constraintDescription: 'Enter a valid database name (1-32 characters, alphanumeric, underscore, hyphen, or dot).'
-    });
-
-    const databaseSchema = new CfnParameter(this, 'DatabaseSchema', {
-      type: 'String',
-      description: 'Database schema for the Oky deployment.',
+      description: 'User database schema for ECS Tasks.',
       allowedPattern: '^[a-zA-Z0-9._-]{1,32}$',
       constraintDescription: 'Enter a valid database schema (1-32 characters, alphanumeric, underscore, hyphen, or dot).'
     });
 
     const databaseMinCapacityUnits = new CfnParameter(this, 'DatabaseMinCapacityUnits', {
       type: 'Number',
-      description: 'Minimum capacity units for the database.',
+      description: 'Aurora Postgres backend user database, minimum capacity units.',
       default: 0,
       minValue: 0,
       maxValue: 16
     });
     const databaseMaxCapacityUnits = new CfnParameter(this, 'DatabaseMaxCapacityUnits', {
       type: 'Number',
-      description: 'Maximum capacity units for the database.',
+      description: 'Aurora Postgres backend user database, maximum capacity units.',
       default: 1,
       minValue: 1,
       maxValue: 16
     });
     const databaseAutoPauseDurationSeconds = new CfnParameter(this, 'DatabaseAutoPauseDurationSeconds', {
       type: 'Number',
-      description: 'Auto pause duration (in seconds) for the database.',
+      description: 'Aurora Postgres backend user database, auto-pause duration (in seconds) .',
       default: 300,
       minValue: 0,
       maxValue: 86400
     });
     const databaseBackupRetentionDays = new CfnParameter(this, 'DatabaseBackupRetentionDays', {
       type: 'Number',
-      description: 'Backup retention period (in days) for the database.',
+      description: 'Aurora Postgres backend user database, backup retention period (in days).',
       default: 7,
       minValue: 1,
       maxValue: 35
@@ -142,7 +123,7 @@ export class OkyAwsStack extends Stack {
 
     const environment = new CfnParameter(this, 'Environment', {
       type: 'String',
-      description: 'Deployment environment for the Oky deployment.',
+      description: 'Deployment environment.',
       allowedPattern: '^[a-zA-Z0-9._-]{1,32}$',
       constraintDescription: 'Enter a valid environment name (1-32 characters, alphanumeric, underscore, hyphen, or dot).'
     });
@@ -192,23 +173,24 @@ export class OkyAwsStack extends Stack {
       ec2.InterfaceVpcEndpointAwsService.CLOUDWATCH_LOGS,
       ec2.InterfaceVpcEndpointAwsService.ECR,
       ec2.InterfaceVpcEndpointAwsService.ECR_DOCKER,
-      ec2.InterfaceVpcEndpointAwsService.SSM
+      ec2.InterfaceVpcEndpointAwsService.SECRETS_MANAGER
     ]) {
-      vpc.addInterfaceEndpoint(`${service.shortName.replace(/[^a-zA-Z0-9]/g, '')}Endpoint`, {
-        service,
-        subnets: privateSubnets,
-        securityGroups: [endpointSecurityGroup]
-      });
+        const endpointName = `${service.shortName.replace(/[^a-zA-Z0-9]/g, '')}Endpoint`;
+        vpc.addInterfaceEndpoint(endpointName, {
+          service,
+          subnets: privateSubnets,
+          securityGroups: [endpointSecurityGroup]
+        });
     }
 
     const apiRepository = new ecr.Repository(this, 'ApiRepository', {
-      repositoryName: 'oky/api',
+      repositoryName: PROJECT_NAME.toLowerCase() + '/api',
       imageTagMutability: ecr.TagMutability.IMMUTABLE,
       imageScanOnPush: true,
       removalPolicy: RemovalPolicy.RETAIN
     });
     const cmsRepository = new ecr.Repository(this, 'CmsRepository', {
-      repositoryName: 'oky/cms',
+      repositoryName: PROJECT_NAME.toLowerCase() + '/cms',
       imageTagMutability: ecr.TagMutability.IMMUTABLE,
       imageScanOnPush: true,
       removalPolicy: RemovalPolicy.RETAIN
@@ -216,48 +198,58 @@ export class OkyAwsStack extends Stack {
 
     const databaseSecurityGroup = new ec2.SecurityGroup(this, 'DatabaseSecurityGroup', {
       vpc,
-      description: 'PostgreSQL access from the API and CMS task security groups.',
+      description: 'PostgreSQL access from the API and CMS ECS Task security groups.',
       allowAllOutbound: false
     });
     databaseSecurityGroup.addIngressRule(apiTaskSecurityGroup, ec2.Port.tcp(POSTGRES_PORT));
     databaseSecurityGroup.addIngressRule(cmsTaskSecurityGroup, ec2.Port.tcp(POSTGRES_PORT));
 
-    const databasePassword = ssm.StringParameter.fromSecureStringParameterAttributes(
+    const applicationSecretsKey = new kms.Key(this, 'ApplicationSecretsKey', {
+      alias: 'alias/application-secrets-key',
+      description: 'CMK for encrypting API and CMS ECS Task application secrets.',
+      enableKeyRotation: true,
+      removalPolicy: RemovalPolicy.RETAIN
+    });
+
+    const replaceableSecretValue = SecretValue.unsafePlainText('REPLACE');
+    const applicationSecretSecret = new secretsmanager.Secret (
       this,
-      'DatabasePasswordParameter',
+      'ApplicationSecretSecret',
       {
-        parameterName: DATABASE_PASSWORD_PARAMETER,
-        version: 1
+        secretName: APPLICATION_SECRET_SECRET_NAME,
+        secretStringValue: replaceableSecretValue,
+        encryptionKey: applicationSecretsKey,
       }
     );
-    const applicationSecret = ssm.StringParameter.fromSecureStringParameterAttributes(
+    const passportSecretSecret = new secretsmanager.Secret(
       this,
-      'ApplicationSecretParameter',
+      'PassportSecretSecret',
       {
-        parameterName: APPLICATION_SECRET_PARAMETER,
-        version: 1
+        secretName: PASSPORT_SECRET_SECRET_NAME,
+        secretStringValue: replaceableSecretValue,
+        encryptionKey: applicationSecretsKey,
       }
     );
-    const passportSecret = ssm.StringParameter.fromSecureStringParameterAttributes(
+    const googleApplicationCredentialsSecret = new secretsmanager.Secret(
       this,
-      'PassportSecretParameter',
+      'GoogleApplicationCredentialsSecret',
       {
-        parameterName: PASSPORT_SECRET_PARAMETER,
-        version: 1
+        secretName: GOOGLE_APPLICATION_CREDENTIALS_SECRET_NAME,
+        secretStringValue: replaceableSecretValue,
+        encryptionKey: applicationSecretsKey,
       }
     );
 
-    const googleApplicationCredentials = ssm.StringParameter.fromSecureStringParameterAttributes(
-      this,
-      'GoogleApplicationCredentialsParameter',
-      {
-        parameterName: GOOGLE_APPLICATION_CREDENTIALS_PARAMETER,
-        version: 1
-      }
-    );
-    // Create CMK for encrypting the database storage.
-    const databaseKey = new kms.Key(this, 'DatabaseKey', {
-      alias: 'alias/database-key',
+    const databaseStorageKey = new kms.Key(this, 'DatabaseStorageKey', {
+      alias: 'alias/database-storage-key',
+      description: 'CMK for encrypting the database storage.',
+      enableKeyRotation: true,
+      removalPolicy: RemovalPolicy.RETAIN
+    });
+
+    const databaseCredentialsKey = new kms.Key(this, 'DatabaseCredentialsKey', {
+      alias: 'alias/database-credentials-key',
+      description: 'CMK for encrypting the database credentials.',
       enableKeyRotation: true,
       removalPolicy: RemovalPolicy.RETAIN
     });
@@ -266,11 +258,11 @@ export class OkyAwsStack extends Stack {
       engine: rds.DatabaseClusterEngine.auroraPostgres({
         version: POSTGRES_VERSION
       }),
-      credentials: rds.Credentials.fromPassword(
-        databaseUsername.valueAsString,
-        SecretValue.ssmSecure(DATABASE_PASSWORD_PARAMETER, '1')
-      ),
-      defaultDatabaseName: databaseName.valueAsString,
+      credentials: rds.Credentials.fromGeneratedSecret(DATABASE_CLUSTER_MASTER_USERNAME, {
+        secretName: DATABASE_CLUSTER_CREDENTIALS_SECRET_NAME,
+        encryptionKey: databaseCredentialsKey,
+      }),
+      defaultDatabaseName: DATABASE_CLUSTER_DEFAULT_DATABASE_NAME,
       writer: rds.ClusterInstance.serverlessV2('writer'),
       vpc,
       vpcSubnets: privateSubnets,
@@ -280,38 +272,40 @@ export class OkyAwsStack extends Stack {
       serverlessV2AutoPauseDuration: Duration.seconds(databaseAutoPauseDurationSeconds.valueAsNumber),
       backup: { retention: Duration.days(databaseBackupRetentionDays.valueAsNumber) },
       storageEncrypted: true,
-      storageEncryptionKey: databaseKey,
+      storageEncryptionKey: databaseStorageKey,
       deletionProtection: true,
       removalPolicy: RemovalPolicy.SNAPSHOT
     });
 
-    const cluster = new ecs.Cluster(this, 'EcsCluster', {
+    const ecsCluster = new ecs.Cluster(this, 'EcsCluster', {
       vpc,
-      clusterName: 'oky-ecs-cluster',
+      clusterName: PROJECT_NAME.toLowerCase() + '-ecs-cluster',
       enableFargateCapacityProviders: true
     });
 
     const apiLogGroup = new logs.LogGroup(this, 'ApiLogGroup', {
-      logGroupName: '/ecs/oky-ecs-api-task',
+      logGroupName: '/ecs/' + PROJECT_NAME.toLowerCase() + '-ecs-api-task',
       retention: logs.RetentionDays.ONE_WEEK,
       removalPolicy: RemovalPolicy.RETAIN
     });
     const cmsLogGroup = new logs.LogGroup(this, 'CmsLogGroup', {
-      logGroupName: '/ecs/oky-ecs-cms-task',
+      logGroupName: '/ecs/' + PROJECT_NAME.toLowerCase() + '-ecs-cms-task',
       retention: logs.RetentionDays.ONE_WEEK,
       removalPolicy: RemovalPolicy.RETAIN
     });
 
     const apiExecutionRole = this.createTaskExecutionRole('ApiTaskExecutionRole');
     const cmsExecutionRole = this.createTaskExecutionRole('CmsTaskExecutionRole');
-    databasePassword.grantRead(apiExecutionRole);
-    databasePassword.grantRead(cmsExecutionRole);
-    applicationSecret.grantRead(apiExecutionRole);
-    passportSecret.grantRead(cmsExecutionRole);
-    googleApplicationCredentials.grantRead(cmsExecutionRole);
+
+    applicationSecretSecret.grantRead(apiExecutionRole);
+    passportSecretSecret.grantRead(cmsExecutionRole);
+    googleApplicationCredentialsSecret.grantRead(cmsExecutionRole);
+
+    database.secret!.grantRead(apiExecutionRole);
+    database.secret!.grantRead(cmsExecutionRole);
 
     const apiTask = new ecs.FargateTaskDefinition(this, 'ApiTaskDefinition', {
-      family: 'oky-ecs-api-task',
+      family: PROJECT_NAME.toLowerCase() + '-ecs-api-task',
       cpu: apiServiceCpu.valueAsNumber,
       memoryLimitMiB: apiServiceMemory.valueAsNumber,
       executionRole: apiExecutionRole
@@ -326,21 +320,21 @@ export class OkyAwsStack extends Stack {
         DATABASE_TYPE: 'postgres',
         DATABASE_SYNCHRONIZE: 'false',
         DATABASE_LOGGING: 'true',
-        DATABASE_HOST: database.clusterEndpoint.hostname,
-        DATABASE_PORT: POSTGRES_PORT.toString(),
-        DATABASE_NAME: databaseName.valueAsString,
-        DATABASE_SCHEMA: databaseSchema.valueAsString,
-        DATABASE_USERNAME: databaseUsername.valueAsString
+        DATABASE_NAME: DATABASE_CLUSTER_DEFAULT_DATABASE_NAME,
+        DATABASE_SCHEMA: clientDatabaseSchema.toString(),
       },
       secrets: {
-        APPLICATION_SECRET: ecs.Secret.fromSsmParameter(applicationSecret),
-        DATABASE_PASSWORD: ecs.Secret.fromSsmParameter(databasePassword)
+        APPLICATION_SECRET: ecs.Secret.fromSecretsManager(applicationSecretSecret),
+        DATABASE_HOST: ecs.Secret.fromSecretsManager(database.secret!, 'host'),
+        DATABASE_PORT: ecs.Secret.fromSecretsManager(database.secret!, 'port'),
+        DATABASE_USERNAME: ecs.Secret.fromSecretsManager(database.secret!, 'username'),
+        DATABASE_PASSWORD: ecs.Secret.fromSecretsManager(database.secret!, 'password'),
       }
     });
     apiContainer.addPortMappings({ containerPort: API_SERVICE_PORT, protocol: ecs.Protocol.TCP });
 
     const cmsTask = new ecs.FargateTaskDefinition(this, 'CmsTaskDefinition', {
-      family: 'oky-ecs-cms-task',
+      family: PROJECT_NAME.toLowerCase() + '-ecs-cms-task',
       cpu: cmsServiceCpu.valueAsNumber,
       memoryLimitMiB: cmsServiceMemory.valueAsNumber,
       executionRole: cmsExecutionRole
@@ -353,21 +347,22 @@ export class OkyAwsStack extends Stack {
         DATABASE_TYPE: 'postgres',
         DATABASE_SYNCHRONIZE: 'false',
         DATABASE_LOGGING: 'false',
-        DATABASE_HOST: database.clusterEndpoint.hostname,
-        DATABASE_PORT: POSTGRES_PORT.toString(),
-        DATABASE_NAME: databaseName.valueAsString,
-        DATABASE_SCHEMA: databaseSchema.valueAsString,
-        DATABASE_USERNAME: databaseUsername.valueAsString
+        DATABASE_NAME: DATABASE_CLUSTER_DEFAULT_DATABASE_NAME,
+        DATABASE_SCHEMA: clientDatabaseSchema.toString(),
       },
       secrets: {
-        PASSPORT_SECRET: ecs.Secret.fromSsmParameter(passportSecret),
-        GOOGLE_APPLICATION_CREDENTIALS: ecs.Secret.fromSsmParameter(googleApplicationCredentials)
+        PASSPORT_SECRET: ecs.Secret.fromSecretsManager(passportSecretSecret),
+        GOOGLE_APPLICATION_CREDENTIALS: ecs.Secret.fromSecretsManager(googleApplicationCredentialsSecret),
+        DATABASE_HOST: ecs.Secret.fromSecretsManager(database.secret!, 'host'),
+        DATABASE_PORT: ecs.Secret.fromSecretsManager(database.secret!, 'port'),
+        DATABASE_USERNAME: ecs.Secret.fromSecretsManager(database.secret!, 'username'),
+        DATABASE_PASSWORD: ecs.Secret.fromSecretsManager(database.secret!, 'password'),
       }
     });
     cmsContainer.addPortMappings({ containerPort: CMS_SERVICE_PORT, protocol: ecs.Protocol.TCP });
 
     const apiService = new ecs.FargateService(this, 'ApiService', {
-      cluster,
+      cluster: ecsCluster,
       taskDefinition: apiTask,
       desiredCount: 1,
       assignPublicIp: true,
@@ -377,7 +372,7 @@ export class OkyAwsStack extends Stack {
     });
 
     const cmsService = new ecs.FargateService(this, 'CmsService', {
-      cluster,
+      cluster: ecsCluster,
       taskDefinition: cmsTask,
       desiredCount: 1,
       assignPublicIp: true,
@@ -387,8 +382,8 @@ export class OkyAwsStack extends Stack {
     });
 
     const loadBalancerCertificate = new acm.Certificate(this, 'LoadBalancerCert', {
-      domainName: `${apiServiceSubdomain.valueAsString}.${domainName.valueAsString}`,
-      subjectAlternativeNames: [`${cmsServiceSubdomain.valueAsString}.${domainName.valueAsString}`],
+      domainName: apiServiceDomainName.valueAsString,
+      subjectAlternativeNames: [cmsServiceDomainName.valueAsString],
       validation: acm.CertificateValidation.fromDns(),
     });
 
@@ -439,7 +434,7 @@ export class OkyAwsStack extends Stack {
     listener.addAction('ApiRule', {
       priority: 1,
       conditions: [
-        elbv2.ListenerCondition.hostHeaders([`${apiServiceSubdomain.valueAsString}.${domainName.valueAsString}`])
+        elbv2.ListenerCondition.hostHeaders([apiServiceDomainName.valueAsString])
       ],
       action: elbv2.ListenerAction.forward([apiTargetGroup])
     });
@@ -447,7 +442,7 @@ export class OkyAwsStack extends Stack {
     listener.addAction('CmsRule', {
       priority: 2,
       conditions: [
-        elbv2.ListenerCondition.hostHeaders([`${cmsServiceSubdomain.valueAsString}.${domainName.valueAsString}`])
+        elbv2.ListenerCondition.hostHeaders([cmsServiceDomainName.valueAsString])
       ],
       action: elbv2.ListenerAction.forward([cmsTargetGroup])
     });
@@ -460,7 +455,7 @@ export class OkyAwsStack extends Stack {
     cmsService.attachToApplicationTargetGroup(cmsTargetGroup);
 
     new CfnOutput(this, 'VpcId', { value: vpc.vpcId });
-    new CfnOutput(this, 'EcsClusterName', { value: cluster.clusterName });
+    new CfnOutput(this, 'EcsClusterName', { value: ecsCluster.clusterName });
     new CfnOutput(this, 'DatabaseEndpoint', { value: database.clusterEndpoint.hostname });
     new CfnOutput(this, 'ApiRepositoryUri', { value: apiRepository.repositoryUri });
     new CfnOutput(this, 'CmsRepositoryUri', { value: cmsRepository.repositoryUri });
