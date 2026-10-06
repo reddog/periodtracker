@@ -7,7 +7,7 @@ import {
   Stack,
   StackProps
 } from 'aws-cdk-lib';
-import * as acm from 'aws-cdk-lib/aws-certificatemanager';
+// import * as acm from 'aws-cdk-lib/aws-certificatemanager';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as ecr from 'aws-cdk-lib/aws-ecr';
 import * as ecs from 'aws-cdk-lib/aws-ecs';
@@ -26,13 +26,14 @@ const DATABASE_CLUSTER_CREDENTIALS_SECRET_NAME = '/oky/database/credentials';
 const APPLICATION_SECRET_SECRET_NAME = '/oky/api/application-secret';
 const PASSPORT_SECRET_SECRET_NAME = '/oky/cms/passport-secret';
 const GOOGLE_APPLICATION_CREDENTIALS_SECRET_NAME = '/oky/cms/google-application-credentials';
+const FIREBASE_SERVICE_ACCOUNT_BASE64_SECRET_NAME = '/oky/cms/firebase-service-account-base64';
 const POSTGRES_PORT = 5432;
 const HTTPS_PORT = 443;
 const API_SERVICE_PORT = 3000;
 const CMS_SERVICE_PORT = 5000;
-const POSTGRES_VERSION = rds.AuroraPostgresEngineVersion.VER_16_4;
+const POSTGRES_VERSION = rds.AuroraPostgresEngineVersion.VER_16_11;
 
-export class OkyAwsStack extends Stack {
+export class OkyStack extends Stack {
   constructor(scope: Construct, id: string, props?: StackProps) {
     super(scope, id, props);
 
@@ -50,6 +51,13 @@ export class OkyAwsStack extends Stack {
       constraintDescription: 'Enter a valid domain name (alphanumeric, dot, or hyphen).'
     });
 
+    const apiServiceDesiredCount = new CfnParameter(this, 'ApiServiceDesiredCount', {
+      type: 'Number',
+      description: 'API service ECS Task, desired count.',
+      default: 0,
+      minValue: 0,
+      maxValue: 10
+    });
     const apiServiceCpu = new CfnParameter(this, 'ApiServiceCpu', {
       type: 'Number',
       description: 'API service ECS Task, CPU units.',
@@ -65,6 +73,13 @@ export class OkyAwsStack extends Stack {
       maxValue: 4096
     });
 
+    const cmsServiceDesiredCount = new CfnParameter(this, 'CmsServiceDesiredCount', {
+      type: 'Number',
+      description: 'CMS service ECS Task, desired count.',
+      default: 0,
+      minValue: 0,
+      maxValue: 10
+    });
     const cmsServiceCpu = new CfnParameter(this, 'CmsServiceCpu', {
       type: 'Number',
       description: 'CMS service ECS Task, CPU units.',
@@ -80,7 +95,7 @@ export class OkyAwsStack extends Stack {
       maxValue: 4096
     });
 
-    const clientDatabaseSchema = new CfnParameter(this, 'ClientDatabaseSchema', {
+    const databaseSchema = new CfnParameter(this, 'DatabaseSchema', {
       type: 'String',
       description: 'User database schema for ECS Tasks.',
       allowedPattern: '^[a-zA-Z0-9._-]{1,32}$',
@@ -121,16 +136,22 @@ export class OkyAwsStack extends Stack {
       description: 'URL for the delete account endpoint.',
     });
 
-    const environment = new CfnParameter(this, 'Environment', {
+    const nodeEnv = new CfnParameter(this, 'NodeEnv', {
       type: 'String',
-      description: 'Deployment environment.',
+      description: 'Value of NODE_ENV in the API and CMS ECS tasks.',
       allowedPattern: '^[a-zA-Z0-9._-]{1,32}$',
-      constraintDescription: 'Enter a valid environment name (1-32 characters, alphanumeric, underscore, hyphen, or dot).'
+      constraintDescription: 'Enter a valid NODE_ENV value (1-32 characters, alphanumeric, underscore, hyphen, or dot).'
     });
 
-    // Tags to apply to all resources in this stack.
+    // const loadBalancerCertificateArn = new CfnParameter(this, 'LoadBalancerCertificateArn', {
+    //   type: 'String',
+    //   description: 'ARN of the existing ACM certificate for the load balancer.',
+    //   allowedPattern: '^arn:aws:acm:[a-z0-9-]+:[0-9]{12}:certificate/[a-f0-9-]+$',
+    //   constraintDescription: 'Enter a valid ACM certificate ARN.'
+    // });
+
+    // The Environment tag is passed via `cdk deploy --tags` because tag values can't be CloudFormation tokens.
     Stack.of(this).tags.setTag('Project', PROJECT_NAME);
-    Stack.of(this).tags.setTag('Environment', environment.valueAsString);
 
     const vpc = new ec2.Vpc(this, 'Vpc', {
       maxAzs: 2,
@@ -185,15 +206,19 @@ export class OkyAwsStack extends Stack {
 
     const apiRepository = new ecr.Repository(this, 'ApiRepository', {
       repositoryName: PROJECT_NAME.toLowerCase() + '/api',
-      imageTagMutability: ecr.TagMutability.IMMUTABLE,
+      imageTagMutability: ecr.TagMutability.MUTABLE,
       imageScanOnPush: true,
-      removalPolicy: RemovalPolicy.RETAIN
+      // Retain the repository even if the stack is deleted - fully delete whilst testing
+      // removalPolicy: RemovalPolicy.RETAIN
+      removalPolicy: RemovalPolicy.DESTROY
     });
     const cmsRepository = new ecr.Repository(this, 'CmsRepository', {
       repositoryName: PROJECT_NAME.toLowerCase() + '/cms',
-      imageTagMutability: ecr.TagMutability.IMMUTABLE,
+      imageTagMutability: ecr.TagMutability.MUTABLE,
       imageScanOnPush: true,
-      removalPolicy: RemovalPolicy.RETAIN
+      // Retain the repository even if the stack is deleted - fully delete whilst testing
+      // removalPolicy: RemovalPolicy.RETAIN
+      removalPolicy: RemovalPolicy.DESTROY
     });
 
     const databaseSecurityGroup = new ec2.SecurityGroup(this, 'DatabaseSecurityGroup', {
@@ -208,7 +233,9 @@ export class OkyAwsStack extends Stack {
       alias: 'alias/application-secrets-key',
       description: 'CMK for encrypting API and CMS ECS Task application secrets.',
       enableKeyRotation: true,
-      removalPolicy: RemovalPolicy.RETAIN
+      // Retain the repository even if the stack is deleted - fully delete whilst testing
+      // removalPolicy: RemovalPolicy.RETAIN
+      removalPolicy: RemovalPolicy.DESTROY
     });
 
     const replaceableSecretValue = SecretValue.unsafePlainText('REPLACE');
@@ -239,19 +266,23 @@ export class OkyAwsStack extends Stack {
         encryptionKey: applicationSecretsKey,
       }
     );
+    const firebaseServiceAccountBase64Secret = new secretsmanager.Secret(
+      this,
+      'FirebaseServiceAccountBase64Secret',
+      {
+        secretName: FIREBASE_SERVICE_ACCOUNT_BASE64_SECRET_NAME,
+        secretStringValue: replaceableSecretValue,
+        encryptionKey: applicationSecretsKey,
+      }
+    );
 
     const databaseStorageKey = new kms.Key(this, 'DatabaseStorageKey', {
       alias: 'alias/database-storage-key',
       description: 'CMK for encrypting the database storage.',
       enableKeyRotation: true,
-      removalPolicy: RemovalPolicy.RETAIN
-    });
-
-    const databaseCredentialsKey = new kms.Key(this, 'DatabaseCredentialsKey', {
-      alias: 'alias/database-credentials-key',
-      description: 'CMK for encrypting the database credentials.',
-      enableKeyRotation: true,
-      removalPolicy: RemovalPolicy.RETAIN
+      // Retain the repository even if the stack is deleted - fully delete whilst testing
+      // removalPolicy: RemovalPolicy.RETAIN
+      removalPolicy: RemovalPolicy.DESTROY
     });
 
     const database = new rds.DatabaseCluster(this, 'Database', {
@@ -260,21 +291,39 @@ export class OkyAwsStack extends Stack {
       }),
       credentials: rds.Credentials.fromGeneratedSecret(DATABASE_CLUSTER_MASTER_USERNAME, {
         secretName: DATABASE_CLUSTER_CREDENTIALS_SECRET_NAME,
-        encryptionKey: databaseCredentialsKey,
+        encryptionKey: applicationSecretsKey,
       }),
       defaultDatabaseName: DATABASE_CLUSTER_DEFAULT_DATABASE_NAME,
-      writer: rds.ClusterInstance.serverlessV2('writer'),
+      writer: rds.ClusterInstance.serverlessV2('writer', {
+        availabilityZone: vpc.isolatedSubnets[0].availabilityZone,
+        enablePerformanceInsights: true,
+        performanceInsightRetention: rds.PerformanceInsightRetention.DEFAULT,
+      }),
+      readers: [rds.ClusterInstance.serverlessV2('reader', {
+        availabilityZone: vpc.isolatedSubnets[1].availabilityZone,
+        enablePerformanceInsights: true,
+        performanceInsightRetention: rds.PerformanceInsightRetention.DEFAULT,
+        scaleWithWriter: true,
+      })],
       vpc,
       vpcSubnets: privateSubnets,
       securityGroups: [databaseSecurityGroup],
       serverlessV2MinCapacity: databaseMinCapacityUnits.valueAsNumber,
       serverlessV2MaxCapacity: databaseMaxCapacityUnits.valueAsNumber,
       serverlessV2AutoPauseDuration: Duration.seconds(databaseAutoPauseDurationSeconds.valueAsNumber),
+      enablePerformanceInsights: true,
+      performanceInsightRetention: rds.PerformanceInsightRetention.DEFAULT,
+      databaseInsightsMode: rds.DatabaseInsightsMode.STANDARD,
+      engineLifecycleSupport: rds.EngineLifecycleSupport.OPEN_SOURCE_RDS_EXTENDED_SUPPORT_DISABLED,
       backup: { retention: Duration.days(databaseBackupRetentionDays.valueAsNumber) },
       storageEncrypted: true,
       storageEncryptionKey: databaseStorageKey,
-      deletionProtection: true,
-      removalPolicy: RemovalPolicy.SNAPSHOT
+      // Deletion protection is disabled for testing purposes.
+      // deletionProtection: true,
+      deletionProtection: false,
+      // Retain the repository even if the stack is deleted - fully delete whilst testing
+      // removalPolicy: RemovalPolicy.RETAIN
+      removalPolicy: RemovalPolicy.DESTROY
     });
 
     const ecsCluster = new ecs.Cluster(this, 'EcsCluster', {
@@ -286,12 +335,16 @@ export class OkyAwsStack extends Stack {
     const apiLogGroup = new logs.LogGroup(this, 'ApiLogGroup', {
       logGroupName: '/ecs/' + PROJECT_NAME.toLowerCase() + '-ecs-api-task',
       retention: logs.RetentionDays.ONE_WEEK,
-      removalPolicy: RemovalPolicy.RETAIN
+      // Retain the repository even if the stack is deleted - fully delete whilst testing
+      // removalPolicy: RemovalPolicy.RETAIN
+      removalPolicy: RemovalPolicy.DESTROY,
     });
     const cmsLogGroup = new logs.LogGroup(this, 'CmsLogGroup', {
       logGroupName: '/ecs/' + PROJECT_NAME.toLowerCase() + '-ecs-cms-task',
       retention: logs.RetentionDays.ONE_WEEK,
-      removalPolicy: RemovalPolicy.RETAIN
+      // Retain the repository even if the stack is deleted - fully delete whilst testing
+      // removalPolicy: RemovalPolicy.RETAIN
+      removalPolicy: RemovalPolicy.DESTROY,
     });
 
     const apiExecutionRole = this.createTaskExecutionRole('ApiTaskExecutionRole');
@@ -300,6 +353,7 @@ export class OkyAwsStack extends Stack {
     applicationSecretSecret.grantRead(apiExecutionRole);
     passportSecretSecret.grantRead(cmsExecutionRole);
     googleApplicationCredentialsSecret.grantRead(cmsExecutionRole);
+    firebaseServiceAccountBase64Secret.grantRead(cmsExecutionRole);
 
     database.secret!.grantRead(apiExecutionRole);
     database.secret!.grantRead(cmsExecutionRole);
@@ -314,19 +368,20 @@ export class OkyAwsStack extends Stack {
       image: ecs.ContainerImage.fromEcrRepository(apiRepository, 'latest'),
       logging: ecs.LogDrivers.awsLogs({ logGroup: apiLogGroup, streamPrefix: 'api' }),
       environment: {
-        NODE_ENV: 'production',
+        NODE_ENV: nodeEnv.valueAsString,
         DELETE_ACCOUNT_URL: deleteAccountUrl.valueAsString,
         API_PORT: API_SERVICE_PORT.toString(),
         DATABASE_TYPE: 'postgres',
         DATABASE_SYNCHRONIZE: 'false',
         DATABASE_LOGGING: 'true',
+        DATABASE_HOST: database.instanceEndpoints[0].hostname,
+        DATABASE_PORT: database.instanceEndpoints[0].port.toString(),
         DATABASE_NAME: DATABASE_CLUSTER_DEFAULT_DATABASE_NAME,
-        DATABASE_SCHEMA: clientDatabaseSchema.toString(),
+        DATABASE_SCHEMA: databaseSchema.valueAsString,
+        USE_AVATAR_CUSTOMIZATION: 'true'
       },
       secrets: {
         APPLICATION_SECRET: ecs.Secret.fromSecretsManager(applicationSecretSecret),
-        DATABASE_HOST: ecs.Secret.fromSecretsManager(database.secret!, 'host'),
-        DATABASE_PORT: ecs.Secret.fromSecretsManager(database.secret!, 'port'),
         DATABASE_USERNAME: ecs.Secret.fromSecretsManager(database.secret!, 'username'),
         DATABASE_PASSWORD: ecs.Secret.fromSecretsManager(database.secret!, 'password'),
       }
@@ -343,18 +398,19 @@ export class OkyAwsStack extends Stack {
       image: ecs.ContainerImage.fromEcrRepository(cmsRepository, 'latest'),
       logging: ecs.LogDrivers.awsLogs({ logGroup: cmsLogGroup, streamPrefix: 'cms' }),
       environment: {
-        NODE_ENV: 'production',
+        NODE_ENV: nodeEnv.valueAsString,
         DATABASE_TYPE: 'postgres',
         DATABASE_SYNCHRONIZE: 'false',
         DATABASE_LOGGING: 'false',
+        DATABASE_HOST: database.instanceEndpoints[0].hostname,
+        DATABASE_PORT: database.instanceEndpoints[0].port.toString(),
         DATABASE_NAME: DATABASE_CLUSTER_DEFAULT_DATABASE_NAME,
-        DATABASE_SCHEMA: clientDatabaseSchema.toString(),
+        DATABASE_SCHEMA: databaseSchema.valueAsString,
       },
       secrets: {
         PASSPORT_SECRET: ecs.Secret.fromSecretsManager(passportSecretSecret),
         GOOGLE_APPLICATION_CREDENTIALS: ecs.Secret.fromSecretsManager(googleApplicationCredentialsSecret),
-        DATABASE_HOST: ecs.Secret.fromSecretsManager(database.secret!, 'host'),
-        DATABASE_PORT: ecs.Secret.fromSecretsManager(database.secret!, 'port'),
+        FIREBASE_SERVICE_ACCOUNT_BASE64: ecs.Secret.fromSecretsManager(firebaseServiceAccountBase64Secret),
         DATABASE_USERNAME: ecs.Secret.fromSecretsManager(database.secret!, 'username'),
         DATABASE_PASSWORD: ecs.Secret.fromSecretsManager(database.secret!, 'password'),
       }
@@ -364,27 +420,27 @@ export class OkyAwsStack extends Stack {
     const apiService = new ecs.FargateService(this, 'ApiService', {
       cluster: ecsCluster,
       taskDefinition: apiTask,
-      desiredCount: 1,
+      desiredCount: apiServiceDesiredCount.valueAsNumber,
       assignPublicIp: true,
       securityGroups: [apiTaskSecurityGroup],
       vpcSubnets: { subnetType: ec2.SubnetType.PUBLIC },
-      healthCheckGracePeriod: Duration.seconds(60)
+      healthCheckGracePeriod: Duration.seconds(60),
+      circuitBreaker: { rollback: true },
+      minHealthyPercent: 100,
+      maxHealthyPercent: 200
     });
 
     const cmsService = new ecs.FargateService(this, 'CmsService', {
       cluster: ecsCluster,
       taskDefinition: cmsTask,
-      desiredCount: 1,
+      desiredCount: cmsServiceDesiredCount.valueAsNumber,
       assignPublicIp: true,
       securityGroups: [cmsTaskSecurityGroup],
       vpcSubnets: { subnetType: ec2.SubnetType.PUBLIC },
-      healthCheckGracePeriod: Duration.seconds(60)
-    });
-
-    const loadBalancerCertificate = new acm.Certificate(this, 'LoadBalancerCert', {
-      domainName: apiServiceDomainName.valueAsString,
-      subjectAlternativeNames: [cmsServiceDomainName.valueAsString],
-      validation: acm.CertificateValidation.fromDns(),
+      healthCheckGracePeriod: Duration.seconds(60),
+      circuitBreaker: { rollback: true },
+      minHealthyPercent: 100,
+      maxHealthyPercent: 200
     });
 
     const apiTargetGroup = new elbv2.ApplicationTargetGroup(this, 'ApiTargetGroup', {
@@ -409,29 +465,43 @@ export class OkyAwsStack extends Stack {
       }
     });
 
+    // const loadBalancerCertificate = acm.Certificate.fromCertificateArn(
+    //   this,
+    //   'LoadBalancerCertificate',
+    //   loadBalancerCertificateArn.valueAsString
+    // );
     const loadBalancer = new elbv2.ApplicationLoadBalancer(this, 'LoadBalancer', {
       vpc,
       internetFacing: true
     });
-    const listener = loadBalancer.addListener('HttpsListener', {
-      port: 443,
-      certificates: [loadBalancerCertificate],
-      defaultAction: elbv2.ListenerAction.fixedResponse(404, {
-        contentType: 'text/plain',
-        messageBody: 'Not Found'
-      })
-    });
-    // redirect http to https
-    loadBalancer.addListener('HttpListener', {
+    // Disable for testing - cert not yet issued
+    // const listener = loadBalancer.addListener('HttpsListener', {
+    //   port: 443,
+    //   certificates: [
+    //     loadBalancerCertificate
+    //   ],
+    //   defaultAction: elbv2.ListenerAction.forward([apiTargetGroup])
+    // });
+    // // redirect http to https
+    // const httpListener = loadBalancer.addListener('HttpListener', {
+    //   port: 80,
+    //   defaultAction: elbv2.ListenerAction.redirect({
+    //     protocol: 'HTTPS',
+    //     port: '443',
+    //     permanent: true
+    //   })
+    // });
+    const httpListener = loadBalancer.addListener('HttpListener', {
       port: 80,
-      defaultAction: elbv2.ListenerAction.redirect({
-        protocol: 'HTTPS',
-        port: '443',
-        permanent: true
-      })
+      defaultAction: elbv2.ListenerAction.forward([apiTargetGroup])
+      // defaultAction: elbv2.ListenerAction.redirect({
+      //   protocol: 'HTTPS',
+      //   port: '443',
+      //   permanent: true
+      // })
     });
     // add rules for api and cms subdomains
-    listener.addAction('ApiRule', {
+    httpListener.addAction('ApiRule', {
       priority: 1,
       conditions: [
         elbv2.ListenerCondition.hostHeaders([apiServiceDomainName.valueAsString])
@@ -439,16 +509,12 @@ export class OkyAwsStack extends Stack {
       action: elbv2.ListenerAction.forward([apiTargetGroup])
     });
 
-    listener.addAction('CmsRule', {
+    httpListener.addAction('CmsRule', {
       priority: 2,
       conditions: [
         elbv2.ListenerCondition.hostHeaders([cmsServiceDomainName.valueAsString])
       ],
       action: elbv2.ListenerAction.forward([cmsTargetGroup])
-    });
-
-    listener.addAction('DefaultRule', {
-      action: elbv2.ListenerAction.forward([apiTargetGroup])
     });
 
     apiService.attachToApplicationTargetGroup(apiTargetGroup);
@@ -460,7 +526,7 @@ export class OkyAwsStack extends Stack {
     new CfnOutput(this, 'ApiRepositoryUri', { value: apiRepository.repositoryUri });
     new CfnOutput(this, 'CmsRepositoryUri', { value: cmsRepository.repositoryUri });
     new CfnOutput(this, 'LoadBalancerDnsName', { value: loadBalancer.loadBalancerDnsName });
-    new CfnOutput(this, 'SSLCertificateArn', { value: loadBalancerCertificate.certificateArn });
+    // new CfnOutput(this, 'SSLCertificateArn', { value: loadBalancerCertificate.certificateArn });
   }
 
   private createTaskExecutionRole(id: string): iam.Role {
